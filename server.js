@@ -27,11 +27,21 @@ const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || "CHURCH_CONF_SECURE_2
 // --- تهيئة Firebase Admin (هام جداً للاتصال بقاعدة البيانات) ---
 try {
     if (!admin.apps.length) {
-        // محاولة قراءة Service Account من متغيرات البيئة
         let serviceAccount;
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-            // إذا كان النص JSON string
-            serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+            try {
+                // محاولة تنظيف النص من مشاكل التنسيق الشائعة في Railway
+                let rawJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+                // إذا كان النص يحتوي على \n كحروف عادية، قم بتحويلها لأسطر حقيقية
+                if (rawJson.includes('\\n')) {
+                    rawJson = rawJson.replace(/\\n/g, '\n');
+                }
+                serviceAccount = JSON.parse(rawJson);
+                console.log("✅ Successfully parsed FIREBASE_SERVICE_ACCOUNT JSON");
+            } catch (jsonErr) {
+                console.error("❌ Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:", jsonErr.message);
+                console.error("Please check the variable in Railway. It must be valid JSON.");
+            }
         } else {
             console.warn("⚠️ Warning: FIREBASE_SERVICE_ACCOUNT not found in environment variables.");
         }
@@ -95,6 +105,9 @@ bot.on('polling_error', (error) => {
 
 bot.on('message', (msg) => {
     console.log(`📩 Received message from [${msg.from.first_name}]: ${msg.text}`);
+    if (msg.contact) {
+         console.log(`📱 Contact shared: ${msg.contact.phone_number}`);
+    }
 });
 
 // --- وظائف مساعدة ---
@@ -115,11 +128,16 @@ const findChatIdByPhone = async (phone) => {
 
     try {
         const searchKey = normalizePhone(phone);
-        // البحث المباشر باستخدام المفتاح (أسرع بكثير)
+        console.log(`🔍 Searching DB for key: telegram_users/${searchKey}`);
+        
         const snapshot = await db.ref(`telegram_users/${searchKey}`).once('value');
         const chatId = snapshot.val();
         
-        console.log(`🔍 Searching for phone: ${searchKey}, Found ChatID: ${chatId}`);
+        if (chatId) {
+            console.log(`✅ Found ChatID: ${chatId} for phone: ${phone}`);
+        } else {
+             console.log(`⚠️ No ChatID found for key: ${searchKey}`);
+        }
         return chatId;
     } catch (error) {
         console.error('Database Read Error:', error.message);
@@ -129,7 +147,11 @@ const findChatIdByPhone = async (phone) => {
 
 // الحفظ في قاعدة البيانات باستخدام Admin SDK
 const saveUserToFirebase = async (chatId, phone, firstName) => {
-    if (!db) return;
+    if (!db) {
+        console.error("❌ Cannot save user: Database not connected");
+        bot.sendMessage(chatId, "عذراً، هناك مشكلة في الاتصال بقاعدة البيانات.");
+        return;
+    }
 
     const cleanPhone = normalizePhone(phone);
     try {
@@ -141,11 +163,9 @@ const saveUserToFirebase = async (chatId, phone, firstName) => {
 أهلاً بك في خدمة مؤتمرات كنيستنا!
 
 ✅ <b>تم تفعيل حسابك وتأكيد رقم هاتفك</b>
-رقم الهاتف المسجل: ${phone}
+رقم الهاتف المسجل: ${cleanPhone}
 
 🎉 بمجرد قبول حجزك من الإدارة، ستصلك التذكرة هنا فوراً.
-
-🙏 <b>صلوا من أجل الخدمة</b>
         `.trim();
 
         bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'HTML' });
@@ -186,30 +206,32 @@ bot.on('contact', async (msg) => {
 // --- API Endpoints ---
 
 app.get('/', (req, res) => {
-    const dbStatus = db ? "Connected ✅" : "Disconnected ❌ (Check Service Account)";
+    const dbStatus = db ? "Connected ✅" : "Disconnected ❌ (Check logs for JSON parse error)";
     res.send(`Church Conference API Server is Running 🚀<br>DB Status: ${dbStatus}`);
 });
 
 app.post('/api/send-approval', authenticateRequest, async (req, res) => {
-    const { phone, userName, conferenceTitle, date, bookingId } = req.body;
+    try {
+        const { phone, userName, conferenceTitle, date, bookingId } = req.body;
 
-    console.log(`📤 Processing Approval for: ${userName} (${phone})`);
+        console.log(`📤 Processing Approval for: ${userName} (${phone})`);
 
-    if (!phone) return res.status(400).json({ error: 'Phone is required', success: false });
+        if (!phone) return res.status(400).json({ error: 'Phone number is missing', success: false });
 
-    // التحقق من قاعدة البيانات
-    if (!db) {
-        return res.status(500).json({ success: false, reason: 'db_error', error: 'Database not connected on server' });
-    }
+        // التحقق من قاعدة البيانات
+        if (!db) {
+            console.error("❌ SERVER ERROR: DB is not initialized.");
+            return res.status(500).json({ success: false, reason: 'db_error', error: 'Database not connected (Check Server Logs)' });
+        }
 
-    const chatId = await findChatIdByPhone(phone);
+        const chatId = await findChatIdByPhone(phone);
 
-    if (!chatId) {
-        console.log(`⚠️ User not found in Telegram mappings for phone: ${phone}`);
-        return res.json({ success: false, reason: 'user_not_found', error: 'User has not started the bot' });
-    }
+        if (!chatId) {
+            console.log(`⚠️ User not found in Telegram mappings for phone: ${phone}`);
+            return res.json({ success: false, reason: 'user_not_found', error: 'User has not shared contact with bot' });
+        }
 
-    const message = `
+        const message = `
 🎉 <b>تم تأكيد حجزك بنعمة ربنا</b>
 
 👤 <b>الاسم:</b> ${userName}
@@ -219,9 +241,8 @@ app.post('/api/send-approval', authenticateRequest, async (req, res) => {
 <b>رقم الحجز:</b> <code>${bookingId}</code>
 
 👇 <b>يرجى إظهار الباركود عند الدخول</b>
-    `.trim();
+        `.trim();
 
-    try {
         const qrBuffer = await QRCode.toBuffer(bookingId, {
             width: 400,
             margin: 2,
@@ -238,13 +259,13 @@ app.post('/api/send-approval', authenticateRequest, async (req, res) => {
 
         console.log(`✅ Ticket sent successfully to ChatID: ${chatId}`);
         return res.json({ success: true, chatId: chatId });
+
     } catch (error) {
         console.error('❌ Telegram Send Error:', error.message);
-        // التحقق مما إذا كان الخطأ بسبب حظر البوت
         if (error.message.includes('403') || error.message.includes('blocked')) {
              return res.json({ success: false, reason: 'bot_blocked', error: 'User blocked the bot' });
         }
-        return res.status(500).json({ success: false, reason: 'telegram_error', error: 'Failed to send message via Telegram' });
+        return res.status(500).json({ success: false, reason: 'telegram_error', error: error.message });
     }
 });
 
