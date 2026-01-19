@@ -2,6 +2,7 @@
 /**
  * Church Conference Server
  * Dedicated Backend Entry Point
+ * Final Version - Robust Connection
  */
 
 import express from 'express';
@@ -14,103 +15,79 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
-// --- Setup Directory Paths for ESM ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// --- إعدادات البيئة ---
+// --- 1. تهيئة التطبيق وإعدادات CORS (أهم خطوة للاتصال) ---
+const app = express();
+
+// السماح بالاتصال من أي مكان (لحل مشكلة Network Error)
+app.use(cors({
+    origin: true, 
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'x-admin-token'],
+    credentials: true
+}));
+
+// التعامل مع طلبات Preflight
+app.options('*', cors());
+app.use(bodyParser.json());
+
+// --- 2. إعدادات البيئة ---
 const PORT = process.env.PORT || 3001;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '8520598013:AAG42JgQICMNO5HlI1nZQcisH0ecwE6aVRA';
 const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://mutamaraty-default-rtdb.firebaseio.com';
 const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || "CHURCH_CONF_SECURE_2025";
 
-// --- تهيئة Firebase Admin (هام جداً للاتصال بقاعدة البيانات) ---
+// --- 3. تهيئة Firebase (مع معالجة مشاكل التنسيق) ---
+let db = null;
+console.log("🔄 Server Starting... Initializing Firebase...");
+
 try {
     if (!admin.apps.length) {
-        let serviceAccount;
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
             try {
-                // محاولة تنظيف النص من مشاكل التنسيق الشائعة في Railway
                 let rawJson = process.env.FIREBASE_SERVICE_ACCOUNT;
-                // إذا كان النص يحتوي على \n كحروف عادية، قم بتحويلها لأسطر حقيقية
+                // إصلاح مشاكل التنسيق الشائعة في Railway
                 if (rawJson.includes('\\n')) {
                     rawJson = rawJson.replace(/\\n/g, '\n');
                 }
-                serviceAccount = JSON.parse(rawJson);
-                console.log("✅ Successfully parsed FIREBASE_SERVICE_ACCOUNT JSON");
-            } catch (jsonErr) {
-                console.error("❌ Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:", jsonErr.message);
-                console.error("Please check the variable in Railway. It must be valid JSON.");
+                // إزالة المسافات الزائدة وإصلاح علامات التنصيص
+                rawJson = rawJson.trim();
+                if (rawJson.startsWith('"') && rawJson.endsWith('"')) {
+                     rawJson = JSON.parse(rawJson);
+                }
+
+                const serviceAccount = JSON.parse(rawJson);
+                
+                admin.initializeApp({
+                    credential: admin.credential.cert(serviceAccount),
+                    databaseURL: FIREBASE_DB_URL
+                });
+                db = admin.database();
+                console.log("✅ Firebase Connected Successfully!");
+            } catch (err) {
+                console.error("❌ CRITICAL: Firebase JSON Error. Please check Railway Variables.", err.message);
             }
         } else {
-            console.warn("⚠️ Warning: FIREBASE_SERVICE_ACCOUNT not found in environment variables.");
+            console.warn("⚠️ Warning: FIREBASE_SERVICE_ACCOUNT is missing in Railway Variables.");
         }
-
-        if (serviceAccount) {
-            admin.initializeApp({
-                credential: admin.credential.cert(serviceAccount),
-                databaseURL: FIREBASE_DB_URL
-            });
-            console.log("✅ Firebase Admin Initialized Successfully");
-        }
+    } else {
+        db = admin.database();
     }
 } catch (error) {
     console.error("❌ Firebase Init Error:", error.message);
 }
 
-const db = admin.apps.length ? admin.database() : null;
-
-// تهيئة التطبيق والبوت
-const app = express();
+// --- 4. تهيئة البوت ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// Middleware
-app.use(cors({
-    origin: '*', 
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'x-admin-token']
-}));
-
-app.use(bodyParser.json());
-
-// Logging Middleware
-app.use((req, res, next) => {
-    console.log(`🔔 Incoming Request: ${req.method} ${req.url}`);
-    next();
-});
-
-// Security Middleware
-const authenticateRequest = (req, res, next) => {
-    const token = req.headers['x-admin-token'];
-    
-    if (req.method === 'OPTIONS') return next();
-    if (req.method === 'GET' && !req.path.startsWith('/api')) return next();
-
-    if (token === SERVER_SECRET_KEY) {
-        next();
-    } else {
-        console.log(`⛔ Unauthorized access attempt from: ${req.ip}`);
-        res.status(403).json({ error: 'Forbidden: Invalid Token' });
-    }
-};
-
-console.log('🚀 Server is starting...');
-
-// --- معالجة أخطاء البوت ---
+// تجاهل أخطاء البوت الشائعة لتجنب توقف السيرفر
 bot.on('polling_error', (error) => {
-    if (error.code !== 'ETELEGRAM' && !error.message.includes('409')) {
-        console.log(`[Bot Polling Error]: ${error.message}`);
-    }
+    // console.log(`Bot Error (Ignored): ${error.message}`);
 });
 
-bot.on('message', (msg) => {
-    console.log(`📩 Received message from [${msg.from.first_name}]: ${msg.text}`);
-    if (msg.contact) {
-         console.log(`📱 Contact shared: ${msg.contact.phone_number}`);
-    }
-});
-
-// --- وظائف مساعدة ---
+// --- 5. وظائف مساعدة ---
 const normalizePhone = (phone) => {
     if (!phone) return '';
     let p = phone.replace(/\D/g, ''); 
@@ -119,171 +96,95 @@ const normalizePhone = (phone) => {
     return p;
 };
 
-// البحث في قاعدة البيانات باستخدام Admin SDK
-const findChatIdByPhone = async (phone) => {
-    if (!db) {
-        console.error("❌ Database not initialized");
-        return null;
-    }
-
-    try {
-        const searchKey = normalizePhone(phone);
-        console.log(`🔍 Searching DB for key: telegram_users/${searchKey}`);
-        
-        const snapshot = await db.ref(`telegram_users/${searchKey}`).once('value');
-        const chatId = snapshot.val();
-        
-        if (chatId) {
-            console.log(`✅ Found ChatID: ${chatId} for phone: ${phone}`);
-        } else {
-             console.log(`⚠️ No ChatID found for key: ${searchKey}`);
-        }
-        return chatId;
-    } catch (error) {
-        console.error('Database Read Error:', error.message);
-        return null;
-    }
-};
-
-// الحفظ في قاعدة البيانات باستخدام Admin SDK
+// حفظ المستخدم عند مشاركة جهة الاتصال
 const saveUserToFirebase = async (chatId, phone, firstName) => {
-    if (!db) {
-        console.error("❌ Cannot save user: Database not connected");
-        bot.sendMessage(chatId, "عذراً، هناك مشكلة في الاتصال بقاعدة البيانات.");
-        return;
-    }
-
+    if (!db) return;
     const cleanPhone = normalizePhone(phone);
     try {
         await db.ref(`telegram_users/${cleanPhone}`).set(chatId.toString());
-        console.log(`✅ Saved user: ${firstName} - ${cleanPhone} (ChatID: ${chatId})`);
-
-        const welcomeMessage = `
-👋 <b>سلام ونعمة يا ${firstName}</b>
-أهلاً بك في خدمة مؤتمرات كنيستنا!
-
-✅ <b>تم تفعيل حسابك وتأكيد رقم هاتفك</b>
-رقم الهاتف المسجل: ${cleanPhone}
-
-🎉 بمجرد قبول حجزك من الإدارة، ستصلك التذكرة هنا فوراً.
-        `.trim();
-
-        bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'HTML' });
-    } catch (error) {
-        console.error('Save Error:', error);
-        bot.sendMessage(chatId, "حدث خطأ أثناء حفظ بياناتك، حاول مرة أخرى.");
+        bot.sendMessage(chatId, `👋 أهلاً ${firstName}!\n✅ تم تفعيل حسابك برقم: ${cleanPhone}\nستصلك التذاكر هنا.`);
+    } catch (e) {
+        console.error("Save User Error:", e);
     }
 };
 
-// --- أوامر البوت ---
-bot.onText(/\/start (.+)/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const payload = match[1];
-    if (payload && payload.length >= 10) {
-        await saveUserToFirebase(chatId, payload, msg.chat.first_name || 'User');
-    }
-});
-
-bot.onText(/\/start$/, async (msg) => {
-    const chatId = msg.chat.id;
-    const firstName = msg.chat.first_name || 'يا مبارك';
-    
-    await bot.sendMessage(chatId, `سلام ونعمة يا ${firstName} ❤️\nأهلاً بك في بوت خدمة المؤتمرات.\n\n👇 اضغط على الزر بالأسفل لمشاركة رقم هاتفك وتفعيل التذاكر`, {
-        reply_markup: {
-            keyboard: [[{ text: "📱 تفعيل حسابي (مشاركة الرقم)", request_contact: true }]],
-            resize_keyboard: true,
-            one_time_keyboard: true
-        }
-    });
-});
-
+// استقبال جهات الاتصال
 bot.on('contact', async (msg) => {
     if (msg.contact && msg.contact.phone_number) {
         await saveUserToFirebase(msg.chat.id, msg.contact.phone_number, msg.chat.first_name || 'User');
     }
 });
 
-// --- API Endpoints ---
-
-app.get('/', (req, res) => {
-    const dbStatus = db ? "Connected ✅" : "Disconnected ❌ (Check logs for JSON parse error)";
-    res.send(`Church Conference API Server is Running 🚀<br>DB Status: ${dbStatus}`);
+bot.onText(/\/start$/, async (msg) => {
+    bot.sendMessage(msg.chat.id, "أهلاً بك! اضغط الزر بالأسفل لتفعيل استلام التذاكر 👇", {
+        reply_markup: {
+            keyboard: [[{ text: "📱 مشاركة رقمي", request_contact: true }]],
+            resize_keyboard: true,
+            one_time_keyboard: true
+        }
+    });
 });
 
-app.post('/api/send-approval', authenticateRequest, async (req, res) => {
+// --- 6. نقاط الاتصال (API Endpoints) ---
+
+// فحص بسيط للتأكد أن السيرفر يعمل
+app.get('/', (req, res) => {
+    res.send(`Server is Running! 🚀 DB Status: ${db ? 'Connected ✅' : 'Not Connected ❌'}`);
+});
+
+// فحص صحة السيرفر من لوحة التحكم
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        db: db ? 'connected' : 'disconnected',
+        time: new Date().toISOString()
+    });
+});
+
+// إرسال التذكرة
+app.post('/api/send-approval', async (req, res) => {
+    // التحقق من مفتاح الأمان
+    if (req.headers['x-admin-token'] !== SERVER_SECRET_KEY) {
+        return res.status(403).json({ success: false, error: 'Unauthorized' });
+    }
+
     try {
         const { phone, userName, conferenceTitle, date, bookingId } = req.body;
 
-        console.log(`📤 Processing Approval for: ${userName} (${phone})`);
+        if (!db) return res.status(503).json({ success: false, error: 'Database not connected' });
+        if (!phone) return res.status(400).json({ success: false, error: 'Phone missing' });
 
-        if (!phone) return res.status(400).json({ error: 'Phone number is missing', success: false });
-
-        // التحقق من قاعدة البيانات
-        if (!db) {
-            console.error("❌ SERVER ERROR: DB is not initialized.");
-            return res.status(500).json({ success: false, reason: 'db_error', error: 'Database not connected (Check Server Logs)' });
-        }
-
-        const chatId = await findChatIdByPhone(phone);
+        // البحث عن معرف شات التيليجرام
+        const cleanPhone = normalizePhone(phone);
+        const snapshot = await db.ref(`telegram_users/${cleanPhone}`).once('value');
+        const chatId = snapshot.val();
 
         if (!chatId) {
-            console.log(`⚠️ User not found in Telegram mappings for phone: ${phone}`);
-            return res.json({ success: false, reason: 'user_not_found', error: 'User has not shared contact with bot' });
+            return res.json({ success: false, reason: 'user_not_found', error: 'User needs to start bot' });
         }
 
+        // إرسال التذكرة
         const message = `
-🎉 <b>تم تأكيد حجزك بنعمة ربنا</b>
-
-👤 <b>الاسم:</b> ${userName}
-📅 <b>المؤتمر:</b> ${conferenceTitle}
-📍 <b>التاريخ:</b> ${date}
-
-<b>رقم الحجز:</b> <code>${bookingId}</code>
-
-👇 <b>يرجى إظهار الباركود عند الدخول</b>
+🎫 <b>تذكرة دخول مؤتمر</b>
+👤 <b>${userName}</b>
+📅 ${conferenceTitle}
+📍 ${date}
+#️⃣ رقم الحجز: <code>${bookingId}</code>
         `.trim();
 
-        const qrBuffer = await QRCode.toBuffer(bookingId, {
-            width: 400,
-            margin: 2,
-            color: { dark: '#000000', light: '#ffffff' }
-        });
+        const qrBuffer = await QRCode.toBuffer(bookingId, { width: 400 });
         
-        await bot.sendPhoto(chatId, qrBuffer, { 
-            caption: message, 
-            parse_mode: 'HTML' 
-        }, {
-            filename: 'ticket.png',
-            contentType: 'image/png'
-        });
-
-        console.log(`✅ Ticket sent successfully to ChatID: ${chatId}`);
-        return res.json({ success: true, chatId: chatId });
+        await bot.sendPhoto(chatId, qrBuffer, { caption: message, parse_mode: 'HTML' });
+        
+        return res.json({ success: true, chatId });
 
     } catch (error) {
-        console.error('❌ Telegram Send Error:', error.message);
-        if (error.message.includes('403') || error.message.includes('blocked')) {
-             return res.json({ success: false, reason: 'bot_blocked', error: 'User blocked the bot' });
-        }
-        return res.status(500).json({ success: false, reason: 'telegram_error', error: error.message });
+        console.error("Send Error:", error);
+        return res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Serve Static Files
-const distPath = path.join(__dirname, 'dist');
-if (fs.existsSync(distPath)) {
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-        if (!req.path.startsWith('/api')) {
-            res.sendFile(path.join(distPath, 'index.html'));
-        }
-    });
-}
-
-app.listen(PORT, () => {
-    console.log(`
---------------------------------------------------
-🌐 Server running on Port ${PORT}
---------------------------------------------------
-    `);
+// تشغيل السيرفر
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Server running on port ${PORT}`);
 });
