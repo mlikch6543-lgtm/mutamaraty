@@ -2,7 +2,7 @@
 /**
  * Church Conference Server
  * Dedicated Backend Entry Point
- * Final Version - Robust Connection
+ * Final Version - Robust Connection & Diagnostics
  */
 
 import express from 'express';
@@ -13,15 +13,13 @@ import admin from 'firebase-admin';
 import QRCode from 'qrcode';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// --- 1. تهيئة التطبيق وإعدادات CORS (أهم خطوة للاتصال) ---
+// --- 1. تهيئة التطبيق ---
 const app = express();
 
-// السماح بالاتصال من أي مكان (لحل مشكلة Network Error)
 app.use(cors({
     origin: true, 
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -29,7 +27,6 @@ app.use(cors({
     credentials: true
 }));
 
-// التعامل مع طلبات Preflight
 app.options('*', cors());
 app.use(bodyParser.json());
 
@@ -39,53 +36,65 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '8520598013:AAG42JgQICMNO5H
 const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://mutamaraty-default-rtdb.firebaseio.com';
 const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || "CHURCH_CONF_SECURE_2025";
 
-// --- 3. تهيئة Firebase (مع معالجة مشاكل التنسيق) ---
+// --- 3. تهيئة Firebase ---
 let db = null;
-console.log("🔄 Server Starting... Initializing Firebase...");
+let firebaseError = null; // لتخزين سبب الخطأ وعرضه لك
+
+console.log("🔄 Server Starting...");
 
 try {
     if (!admin.apps.length) {
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
             try {
                 let rawJson = process.env.FIREBASE_SERVICE_ACCOUNT;
-                // إصلاح مشاكل التنسيق الشائعة في Railway
-                if (rawJson.includes('\\n')) {
-                    rawJson = rawJson.replace(/\\n/g, '\n');
-                }
-                // إزالة المسافات الزائدة وإصلاح علامات التنصيص
-                rawJson = rawJson.trim();
-                if (rawJson.startsWith('"') && rawJson.endsWith('"')) {
-                     rawJson = JSON.parse(rawJson);
+                
+                // محاولة تنظيف النص من الشوائب الشائعة عند النسخ
+                if (typeof rawJson === 'string') {
+                    // إزالة علامات الاقتباس الخارجية إذا وجدت
+                    rawJson = rawJson.trim();
+                    if (rawJson.startsWith("'") && rawJson.endsWith("'")) {
+                        rawJson = rawJson.slice(1, -1);
+                    }
+                    if (rawJson.startsWith('"') && rawJson.endsWith('"') && !rawJson.includes('{')) {
+                         // إذا كان مجرد نص stringified
+                        rawJson = JSON.parse(rawJson);
+                    }
                 }
 
-                const serviceAccount = JSON.parse(rawJson);
-                
+                // محاولة تحويل النص إلى كائن JSON
+                let serviceAccount = typeof rawJson === 'object' ? rawJson : JSON.parse(rawJson);
+
+                // إصلاح private_key إذا كان يحتوي على \n كنص
+                if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
+                    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+                }
+
                 admin.initializeApp({
                     credential: admin.credential.cert(serviceAccount),
                     databaseURL: FIREBASE_DB_URL
                 });
                 db = admin.database();
                 console.log("✅ Firebase Connected Successfully!");
+                firebaseError = null;
             } catch (err) {
-                console.error("❌ CRITICAL: Firebase JSON Error. Please check Railway Variables.", err.message);
+                console.error("❌ Firebase JSON Parse Error:", err.message);
+                firebaseError = `JSON Parsing Error: ${err.message}. Check Railway Variable format.`;
             }
         } else {
-            console.warn("⚠️ Warning: FIREBASE_SERVICE_ACCOUNT is missing in Railway Variables.");
+            console.warn("⚠️ Warning: FIREBASE_SERVICE_ACCOUNT is missing.");
+            firebaseError = "Missing Environment Variable: FIREBASE_SERVICE_ACCOUNT";
         }
     } else {
         db = admin.database();
     }
 } catch (error) {
     console.error("❌ Firebase Init Error:", error.message);
+    firebaseError = `Init Error: ${error.message}`;
 }
 
 // --- 4. تهيئة البوت ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-
-// تجاهل أخطاء البوت الشائعة لتجنب توقف السيرفر
-bot.on('polling_error', (error) => {
-    // console.log(`Bot Error (Ignored): ${error.message}`);
-});
+bot.on('polling_error', () => {}); // منع توقف السيرفر بسبب أخطاء الشبكة
 
 // --- 5. وظائف مساعدة ---
 const normalizePhone = (phone) => {
@@ -96,64 +105,67 @@ const normalizePhone = (phone) => {
     return p;
 };
 
-// حفظ المستخدم عند مشاركة جهة الاتصال
-const saveUserToFirebase = async (chatId, phone, firstName) => {
-    if (!db) return;
-    const cleanPhone = normalizePhone(phone);
-    try {
-        await db.ref(`telegram_users/${cleanPhone}`).set(chatId.toString());
-        bot.sendMessage(chatId, `👋 أهلاً ${firstName}!\n✅ تم تفعيل حسابك برقم: ${cleanPhone}\nستصلك التذاكر هنا.`);
-    } catch (e) {
-        console.error("Save User Error:", e);
-    }
-};
+// --- 6. نقاط الاتصال (API) ---
 
-// استقبال جهات الاتصال
-bot.on('contact', async (msg) => {
-    if (msg.contact && msg.contact.phone_number) {
-        await saveUserToFirebase(msg.chat.id, msg.contact.phone_number, msg.chat.first_name || 'User');
-    }
-});
-
-bot.onText(/\/start$/, async (msg) => {
-    bot.sendMessage(msg.chat.id, "أهلاً بك! اضغط الزر بالأسفل لتفعيل استلام التذاكر 👇", {
-        reply_markup: {
-            keyboard: [[{ text: "📱 مشاركة رقمي", request_contact: true }]],
-            resize_keyboard: true,
-            one_time_keyboard: true
-        }
-    });
-});
-
-// --- 6. نقاط الاتصال (API Endpoints) ---
-
-// فحص بسيط للتأكد أن السيرفر يعمل
+// الصفحة الرئيسية: تعرض تقرير الحالة (مهم جداً للتشخيص)
 app.get('/', (req, res) => {
-    res.send(`Server is Running! 🚀 DB Status: ${db ? 'Connected ✅' : 'Not Connected ❌'}`);
+    const statusColor = db ? 'green' : 'red';
+    const statusText = db ? 'CONNECTED ✅' : 'DISCONNECTED ❌';
+    
+    res.send(`
+    <html>
+        <head><title>Church Server Status</title></head>
+        <body style="font-family: monospace; padding: 20px; background: #f0f0f0;">
+            <div style="background: white; padding: 20px; border-radius: 10px; border-left: 5px solid ${statusColor};">
+                <h1>Server Status 🚀</h1>
+                <p><strong>Database:</strong> <span style="color: ${statusColor}; font-weight: bold; font-size: 1.2em;">${statusText}</span></p>
+                ${firebaseError ? `<div style="background: #ffebee; color: #c62828; padding: 10px; border-radius: 5px; margin-top: 10px;">
+                    <strong>Error Details:</strong><br/>
+                    ${firebaseError}
+                    <hr/>
+                    <h3>How to fix in Railway:</h3>
+                    <ol>
+                        <li>Go to Firebase Console > Project Settings > Service Accounts.</li>
+                        <li>Click "Generate New Private Key".</li>
+                        <li>Open the downloaded JSON file and copy EVERYTHING.</li>
+                        <li>Go to Railway > Variables.</li>
+                        <li>Add variable: <code>FIREBASE_SERVICE_ACCOUNT</code></li>
+                        <li>Paste the JSON content as Value.</li>
+                    </ol>
+                </div>` : ''}
+                <p><strong>Port:</strong> ${PORT}</p>
+                <p><strong>Last Check:</strong> ${new Date().toISOString()}</p>
+            </div>
+        </body>
+    </html>
+    `);
 });
 
-// فحص صحة السيرفر من لوحة التحكم
 app.get('/api/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         db: db ? 'connected' : 'disconnected',
+        error: firebaseError,
         time: new Date().toISOString()
     });
 });
 
-// إرسال التذكرة
 app.post('/api/send-approval', async (req, res) => {
-    // التحقق من مفتاح الأمان
     if (req.headers['x-admin-token'] !== SERVER_SECRET_KEY) {
         return res.status(403).json({ success: false, error: 'Unauthorized' });
     }
 
+    if (!db) {
+        return res.status(503).json({ 
+            success: false, 
+            reason: 'db_error', 
+            error: 'Server Database Disconnected. Please check Server Logs or Home Page for details.' 
+        });
+    }
+
     try {
         const { phone, userName, conferenceTitle, date, bookingId } = req.body;
-
-        if (!db) return res.status(503).json({ success: false, error: 'Database not connected' });
-        if (!phone) return res.status(400).json({ success: false, error: 'Phone missing' });
-
+        
         // البحث عن معرف شات التيليجرام
         const cleanPhone = normalizePhone(phone);
         const snapshot = await db.ref(`telegram_users/${cleanPhone}`).once('value');
@@ -163,7 +175,6 @@ app.post('/api/send-approval', async (req, res) => {
             return res.json({ success: false, reason: 'user_not_found', error: 'User needs to start bot' });
         }
 
-        // إرسال التذكرة
         const message = `
 🎫 <b>تذكرة دخول مؤتمر</b>
 👤 <b>${userName}</b>
@@ -173,7 +184,6 @@ app.post('/api/send-approval', async (req, res) => {
         `.trim();
 
         const qrBuffer = await QRCode.toBuffer(bookingId, { width: 400 });
-        
         await bot.sendPhoto(chatId, qrBuffer, { caption: message, parse_mode: 'HTML' });
         
         return res.json({ success: true, chatId });
@@ -184,7 +194,6 @@ app.post('/api/send-approval', async (req, res) => {
     }
 });
 
-// تشغيل السيرفر
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
