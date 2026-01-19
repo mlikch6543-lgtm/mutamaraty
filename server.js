@@ -20,6 +20,7 @@ const __dirname = path.dirname(__filename);
 
 // --- إعدادات ---
 const PORT = process.env.PORT || 3001;
+// تأكد من أن التوكن صحيح ومن نفس البوت
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '8520598013:AAG42JgQICMNO5HlI1nZQcisH0ecwE6aVRA';
 const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://mutamaraty-default-rtdb.firebaseio.com';
 const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || "CHURCH_CONF_SECURE_2025";
@@ -64,9 +65,14 @@ console.log('🚀 Server is starting...');
 
 // --- معالجة أخطاء البوت ---
 bot.on('polling_error', (error) => {
+    // تجاهل أخطاء التضارب المعتادة عند إعادة التشغيل
     if (error.code !== 'ETELEGRAM' && !error.message.includes('409')) {
-        console.log(`[Polling Error]: ${error.message}`);
+        console.log(`[Bot Polling Error]: ${error.message}`);
     }
+});
+
+bot.on('message', (msg) => {
+    console.log(`📩 Received message from [${msg.from.first_name}]: ${msg.text}`);
 });
 
 // --- وظائف مساعدة ---
@@ -81,6 +87,7 @@ const normalizePhone = (phone) => {
 const findChatIdByPhone = async (phone) => {
     try {
         const searchKey = normalizePhone(phone);
+        // Get all users
         const response = await axios.get(`${FIREBASE_DB_URL}/telegram_users.json`);
         const users = response.data || {};
 
@@ -90,6 +97,8 @@ const findChatIdByPhone = async (phone) => {
                 foundChatId = users[dbPhone];
             }
         });
+        
+        console.log(`🔍 Searching for phone: ${searchKey}, Found ChatID: ${foundChatId}`);
         return foundChatId;
     } catch (error) {
         console.error('Database Error:', error.message);
@@ -101,7 +110,8 @@ const saveUserToFirebase = async (chatId, phone, firstName) => {
     const cleanPhone = phone.replace(/\s/g, '').trim();
     try {
         await axios.put(`${FIREBASE_DB_URL}/telegram_users/${cleanPhone}.json`, JSON.stringify(chatId.toString()));
-        
+        console.log(`✅ Saved user: ${firstName} - ${cleanPhone}`);
+
         const welcomeMessage = `
 👋 <b>سلام ونعمة يا ${firstName}</b>
 أهلاً بك في خدمة مؤتمرات كنيستنا!
@@ -133,7 +143,15 @@ bot.onText(/\/start (.+)/, async (msg, match) => {
 bot.onText(/\/start$/, async (msg) => {
     const chatId = msg.chat.id;
     const firstName = msg.chat.first_name || 'يا مبارك';
-    await bot.sendMessage(chatId, `سلام ونعمة يا ${firstName}، أهلاً بك في بوت خدمة المؤتمرات.`);
+    
+    // إرسال رسالة ترحيب
+    await bot.sendMessage(chatId, `سلام ونعمة يا ${firstName} ❤️\nأهلاً بك في بوت خدمة المؤتمرات.\n\n👇 اضغط على الزر بالأسفل لمشاركة رقم هاتفك وتفعيل التذاكر`, {
+        reply_markup: {
+            keyboard: [[{ text: "📱 تفعيل حسابي (مشاركة الرقم)", request_contact: true }]],
+            resize_keyboard: true,
+            one_time_keyboard: true
+        }
+    });
 });
 
 bot.on('contact', async (msg) => {
@@ -155,12 +173,16 @@ app.get('/api/test', (req, res) => {
 app.post('/api/send-approval', authenticateRequest, async (req, res) => {
     const { phone, userName, conferenceTitle, date, bookingId } = req.body;
 
-    if (!phone) return res.status(400).json({ error: 'Phone is required' });
+    console.log(`📤 Attempting to send ticket to: ${phone}`);
+
+    if (!phone) return res.status(400).json({ error: 'Phone is required', success: false });
 
     const chatId = await findChatIdByPhone(phone);
 
     if (!chatId) {
-        return res.status(404).json({ error: 'User not registered on Telegram bot' });
+        console.log(`⚠️ User not found in Telegram mappings for phone: ${phone}`);
+        // Return 200 with success: false so the frontend can handle it gracefully (Yellow Toast)
+        return res.json({ success: false, reason: 'user_not_found', error: 'User not registered on Telegram bot' });
     }
 
     const message = `
@@ -190,10 +212,11 @@ app.post('/api/send-approval', authenticateRequest, async (req, res) => {
             contentType: 'image/png'
         });
 
+        console.log(`✅ Ticket sent successfully to ChatID: ${chatId}`);
         return res.json({ success: true });
     } catch (error) {
         console.error('❌ Telegram Send Error:', error.message);
-        return res.status(500).json({ error: 'Failed to send message' });
+        return res.status(500).json({ success: false, reason: 'telegram_error', error: 'Failed to send message via Telegram' });
     }
 });
 
