@@ -2,7 +2,7 @@
 /**
  * Church Conference Server
  * Dedicated Backend Entry Point
- * Final Version - Robust Connection & Diagnostics
+ * Final Version - Robust Connection, Diagnostics & Bot Logic
  */
 
 import express from 'express';
@@ -50,13 +50,11 @@ try {
                 
                 // محاولة تنظيف النص من الشوائب الشائعة عند النسخ
                 if (typeof rawJson === 'string') {
-                    // إزالة علامات الاقتباس الخارجية إذا وجدت
                     rawJson = rawJson.trim();
                     if (rawJson.startsWith("'") && rawJson.endsWith("'")) {
                         rawJson = rawJson.slice(1, -1);
                     }
                     if (rawJson.startsWith('"') && rawJson.endsWith('"') && !rawJson.includes('{')) {
-                         // إذا كان مجرد نص stringified
                         rawJson = JSON.parse(rawJson);
                     }
                 }
@@ -105,9 +103,45 @@ const normalizePhone = (phone) => {
     return p;
 };
 
+// حفظ المستخدم عند مشاركة جهة الاتصال
+const saveUserToFirebase = async (chatId, phone, firstName) => {
+    if (!db) {
+        bot.sendMessage(chatId, "⚠️ عذراً، السيرفر غير متصل بقاعدة البيانات حالياً.");
+        return;
+    }
+    const cleanPhone = normalizePhone(phone);
+    try {
+        await db.ref(`telegram_users/${cleanPhone}`).set(chatId.toString());
+        bot.sendMessage(chatId, `👋 أهلاً ${firstName}!\n✅ تم تفعيل حسابك برقم: ${cleanPhone}\nستصلك التذاكر هنا فور قبول حجزك.`);
+        console.log(`✅ Bot registered user: ${cleanPhone} -> ${chatId}`);
+    } catch (e) {
+        console.error("Save User Error:", e);
+        bot.sendMessage(chatId, "❌ حدث خطأ أثناء التسجيل. حاول مرة أخرى لاحقاً.");
+    }
+};
+
+// استقبال جهات الاتصال (Contact)
+bot.on('contact', async (msg) => {
+    if (msg.contact && msg.contact.phone_number) {
+        await saveUserToFirebase(msg.chat.id, msg.contact.phone_number, msg.chat.first_name || 'User');
+    }
+});
+
+// استقبال أمر /start
+bot.onText(/\/start/, async (msg) => {
+    const opts = {
+        reply_markup: {
+            keyboard: [[{ text: "📱 مشاركة رقمي لتفعيل التذاكر", request_contact: true }]],
+            resize_keyboard: true,
+            one_time_keyboard: true
+        }
+    };
+    bot.sendMessage(msg.chat.id, "أهلاً بك في بوت مؤتمرات كنيستنا! ⛪\n\nلضمان استلام التذاكر، يجب ربط حسابك برقم الهاتف المسجل في الحجز.\n\n👇 اضغط على الزر بالأسفل لمشاركة رقمك 👇", opts);
+});
+
 // --- 6. نقاط الاتصال (API) ---
 
-// الصفحة الرئيسية: تعرض تقرير الحالة (مهم جداً للتشخيص)
+// الصفحة الرئيسية: تعرض تقرير الحالة
 app.get('/', (req, res) => {
     const statusColor = db ? 'green' : 'red';
     const statusText = db ? 'CONNECTED ✅' : 'DISCONNECTED ❌';
@@ -119,19 +153,10 @@ app.get('/', (req, res) => {
             <div style="background: white; padding: 20px; border-radius: 10px; border-left: 5px solid ${statusColor};">
                 <h1>Server Status 🚀</h1>
                 <p><strong>Database:</strong> <span style="color: ${statusColor}; font-weight: bold; font-size: 1.2em;">${statusText}</span></p>
+                <p><strong>Bot Status:</strong> Active ✅ (Listening for /start)</p>
                 ${firebaseError ? `<div style="background: #ffebee; color: #c62828; padding: 10px; border-radius: 5px; margin-top: 10px;">
                     <strong>Error Details:</strong><br/>
                     ${firebaseError}
-                    <hr/>
-                    <h3>How to fix in Railway:</h3>
-                    <ol>
-                        <li>Go to Firebase Console > Project Settings > Service Accounts.</li>
-                        <li>Click "Generate New Private Key".</li>
-                        <li>Open the downloaded JSON file and copy EVERYTHING.</li>
-                        <li>Go to Railway > Variables.</li>
-                        <li>Add variable: <code>FIREBASE_SERVICE_ACCOUNT</code></li>
-                        <li>Paste the JSON content as Value.</li>
-                    </ol>
                 </div>` : ''}
                 <p><strong>Port:</strong> ${PORT}</p>
                 <p><strong>Last Check:</strong> ${new Date().toISOString()}</p>
@@ -146,6 +171,7 @@ app.get('/api/health', (req, res) => {
         status: 'ok', 
         db: db ? 'connected' : 'disconnected',
         error: firebaseError,
+        bot: 'active',
         time: new Date().toISOString()
     });
 });
@@ -159,7 +185,7 @@ app.post('/api/send-approval', async (req, res) => {
         return res.status(503).json({ 
             success: false, 
             reason: 'db_error', 
-            error: 'Server Database Disconnected. Please check Server Logs or Home Page for details.' 
+            error: 'Server Database Disconnected.' 
         });
     }
 
@@ -172,7 +198,8 @@ app.post('/api/send-approval', async (req, res) => {
         const chatId = snapshot.val();
 
         if (!chatId) {
-            return res.json({ success: false, reason: 'user_not_found', error: 'User needs to start bot' });
+            console.log(`User not found for phone: ${cleanPhone}`);
+            return res.json({ success: false, reason: 'user_not_found', error: 'User needs to start bot and share contact' });
         }
 
         const message = `
@@ -186,10 +213,15 @@ app.post('/api/send-approval', async (req, res) => {
         const qrBuffer = await QRCode.toBuffer(bookingId, { width: 400 });
         await bot.sendPhoto(chatId, qrBuffer, { caption: message, parse_mode: 'HTML' });
         
+        console.log(`Ticket sent to ${cleanPhone} (ChatID: ${chatId})`);
         return res.json({ success: true, chatId });
 
     } catch (error) {
         console.error("Send Error:", error);
+        // التعامل مع حالات حظر البوت
+        if (error.response && error.response.body && error.response.body.error_code === 403) {
+             return res.json({ success: false, reason: 'bot_blocked', error: 'User blocked the bot' });
+        }
         return res.status(500).json({ success: false, error: error.message });
     }
 });
