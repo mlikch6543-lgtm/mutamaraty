@@ -59,13 +59,14 @@ try {
                 // تنظيف النص في حال كان محاطاً بعلامات تنصيص زائدة بسبب Railway
                 if (typeof rawJson === 'string') {
                     rawJson = rawJson.trim();
+                    // إزالة علامات التنصيص الزائدة في البداية والنهاية إذا وجدت
                     if (rawJson.startsWith("'") && rawJson.endsWith("'")) rawJson = rawJson.slice(1, -1);
                     if (rawJson.startsWith('"') && rawJson.endsWith('"') && !rawJson.includes('{')) rawJson = JSON.parse(rawJson);
                 }
 
                 let serviceAccount = typeof rawJson === 'object' ? rawJson : JSON.parse(rawJson);
 
-                // إصلاح مشكلة New Line في المفتاح الخاص
+                // إصلاح مشكلة New Line في المفتاح الخاص التي تحدث أحياناً عند نسخها
                 if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
                     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
                 }
@@ -96,7 +97,10 @@ try {
 // --- 4. تهيئة البوت ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 bot.on('polling_error', (error) => {
-    console.log("Telegram Polling Error (Ignored):", error.code);
+    // تجاهل أخطاء الاتصال المتكررة لمنع إغراق السجلات
+    if (error.code !== 'ETELEGRAM') {
+        console.log("Telegram Polling Error:", error.code);
+    }
 }); 
 
 // --- 5. وظائف مساعدة ---
