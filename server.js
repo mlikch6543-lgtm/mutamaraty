@@ -2,7 +2,7 @@
 /**
  * Church Conference Server
  * Dedicated Backend Entry Point
- * Serves both API and React Frontend
+ * Final Version - Robust Connection, Diagnostics & Bot Logic & Paymob Integration
  */
 
 import express from 'express';
@@ -19,31 +19,33 @@ import crypto from 'crypto';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// --- 1. App Initialization ---
+// --- 1. تهيئة التطبيق ---
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Enable CORS and JSON parsing
 app.use(cors({
     origin: true, 
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'x-admin-token'],
     credentials: true
 }));
+
+app.options('*', cors());
 app.use(bodyParser.json());
 
-// --- 2. Environment Variables ---
+// --- 2. إعدادات البيئة ---
+const PORT = process.env.PORT || 3000;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '8520598013:AAG42JgQICMNO5HlI1nZQcisH0ecwE6aVRA';
 const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://mutamaraty-default-rtdb.firebaseio.com';
 const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || "CHURCH_CONF_SECURE_2025";
 
-// Paymob Config
-const PAYMOB_API_KEY = process.env.PAYMOB_API_KEY || "ZXlKaGJHY2lPaUpJVXpVeE1pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SmpiR0Z6Y3lJNklrMWxjbU5vWVc1MElpd2ljSEp2Wm1sc1pWOXdheUk2TVRFeE1UYzBNQ3dpYm1GdFpTSTZJbWx1YVhScFlXd2lmUS5lOW1GcEhOVThVRV9pS2hYdzFIdTJISWQwc2pHMG1lSDUwQ0d5RGwyUm55ZEM2WGVFMTl4R2VIOXRtX1pwcFh0RGNnaGlMQ2VySmxoNUdERjF0Sm40QQ==";
-const PAYMOB_INTEGRATION_ID = process.env.PAYMOB_INTEGRATION_ID || "5419269"; 
-const PAYMOB_IFRAME_ID = process.env.PAYMOB_IFRAME_ID || "983782";
-const PAYMOB_HMAC_SECRET = process.env.PAYMOB_HMAC_SECRET || "256D3B8CC68FFB2A11BE0F247EFCDAED";
+// Paymob Config (From Environment Variables)
+// تأكد من إضافة هذه المتغيرات في Railway
+const PAYMOB_API_KEY = process.env.PAYMOB_API_KEY; 
+const PAYMOB_INTEGRATION_ID = process.env.PAYMOB_INTEGRATION_ID; 
+const PAYMOB_IFRAME_ID = process.env.PAYMOB_IFRAME_ID;
+const PAYMOB_HMAC_SECRET = process.env.PAYMOB_HMAC_SECRET;
 
-// --- 3. Firebase Setup ---
+// --- 3. تهيئة Firebase ---
 let db = null;
 let firebaseError = null;
 
@@ -141,19 +143,27 @@ app.get('/api/health', (req, res) => {
         db: db ? 'connected' : 'disconnected',
         error: firebaseError,
         bot: 'active',
-        timestamp: new Date().toISOString()
+        paymobConfigured: !!PAYMOB_API_KEY
     });
 });
 
-// Paymob Initiate
+/**
+ * PAYMOB: Initiate Payment
+ */
 app.post('/api/paymob/initiate', async (req, res) => {
     try {
+        if (!PAYMOB_API_KEY) throw new Error("Paymob API Key not configured on server");
+
         const { bookingId, amount, userDetails } = req.body;
         const amountCents = Math.round(amount * 100);
 
-        const authResponse = await axios.post('https://accept.paymob.com/api/auth/tokens', { api_key: PAYMOB_API_KEY });
+        // 1. Authenticate
+        const authResponse = await axios.post('https://accept.paymob.com/api/auth/tokens', {
+            api_key: PAYMOB_API_KEY
+        });
         const token = authResponse.data.token;
 
+        // 2. Order Registration
         const orderResponse = await axios.post('https://accept.paymob.com/api/ecommerce/orders', {
             auth_token: token,
             delivery_needed: "false",
@@ -164,6 +174,7 @@ app.post('/api/paymob/initiate', async (req, res) => {
         });
         const orderId = orderResponse.data.id;
 
+        // Update DB with initial payment info
         if (db) {
             await db.ref(`bookings/${bookingId}`).update({
                 paymobOrderId: orderId,
@@ -171,11 +182,21 @@ app.post('/api/paymob/initiate', async (req, res) => {
             });
         }
 
+        // 3. Payment Key Request
         const billingData = {
-            apartment: "NA", email: "user@church.com", floor: "NA", 
+            apartment: "NA", 
+            email: "user@church.com", 
+            floor: "NA", 
             first_name: userDetails.name ? userDetails.name.split(' ')[0] : "User", 
-            street: "NA", building: "NA", phone_number: userDetails.phone || "01000000000", 
-            shipping_method: "NA", postal_code: "NA", city: "Cairo", country: "EG", last_name: "Member", state: "NA"
+            street: "NA", 
+            building: "NA", 
+            phone_number: userDetails.phone || "01000000000", 
+            shipping_method: "NA", 
+            postal_code: "NA", 
+            city: "Cairo", 
+            country: "EG", 
+            last_name: userDetails.name ? (userDetails.name.split(' ').slice(1).join(' ') || "Member") : "Member", 
+            state: "NA"
         };
 
         const keyResponse = await axios.post('https://accept.paymob.com/api/acceptance/payment_keys', {
@@ -192,35 +213,47 @@ app.post('/api/paymob/initiate', async (req, res) => {
         const iframeUrl = `https://accept.paymob.com/api/acceptance/iframes/${PAYMOB_IFRAME_ID}?payment_token=${paymentKey}`;
 
         return res.json({ success: true, url: iframeUrl });
+
     } catch (error) {
         console.error("Paymob Init Error:", error.response?.data || error.message);
-        return res.status(500).json({ success: false, error: "Payment initiation failed" });
+        return res.status(500).json({ success: false, error: "Payment initiation failed: " + error.message });
     }
 });
 
-// Paymob Webhook
+/**
+ * PAYMOB: Webhook
+ */
 app.post('/api/paymob/webhook', async (req, res) => {
     try {
         const { obj, type, hmac } = req.body;
+        
         if (type !== 'TRANSACTION') return res.status(200).send();
 
+        // HMAC Verification
         if (PAYMOB_HMAC_SECRET) {
             const {
                 amount_cents, created_at, currency, error_occured, has_parent_transaction,
                 id, integration_id, is_3d_secure, is_auth, is_capture, is_refunded,
                 is_standalone_payment, is_voided, order, owner, pending, source_data, success
             } = obj;
+
+            // Paymob's specific lexical ordering
             const lexicon = [
                 amount_cents, created_at, currency, error_occured, has_parent_transaction,
                 id, integration_id, is_3d_secure, is_auth, is_capture, is_refunded,
                 is_standalone_payment, is_voided, order.id, owner, pending,
                 source_data.pan, source_data.sub_type, source_data.type, success
             ];
+
+            const concatenatedString = lexicon.map(val => val.toString()).join('');
             const calculatedHmac = crypto.createHmac('sha512', PAYMOB_HMAC_SECRET)
-                .update(lexicon.map(val => val.toString()).join(''))
+                .update(concatenatedString)
                 .digest('hex');
 
-            if (hmac !== calculatedHmac) return res.status(403).send(); 
+            if (hmac !== calculatedHmac) {
+                console.error("⚠️ HMAC Mismatch! Request might be fake.");
+                return res.status(403).send(); 
+            }
         }
 
         const isSuccess = obj.success;
@@ -228,15 +261,25 @@ app.post('/api/paymob/webhook', async (req, res) => {
         
         if (db && bookingId) {
             if (isSuccess) {
+                // Auto-approve and mark as paid
                 await db.ref(`bookings/${bookingId}`).update({
                     status: 'APPROVED', 
                     paymentStatus: 'PAID',
-                    amountPaid: obj.amount_cents / 100
+                    amountPaid: obj.amount_cents / 100,
+                    paymobTransactionId: obj.id
                 });
+                
+                // Optional: Send ticket immediately if phone is registered
+                // This logic is best kept separate or triggered here if needed
+                console.log(`💰 Booking ${bookingId} Paid & Approved.`);
             } else {
-                await db.ref(`bookings/${bookingId}`).update({ paymentStatus: 'FAILED' });
+                await db.ref(`bookings/${bookingId}`).update({
+                    paymentStatus: 'FAILED'
+                });
+                console.log(`❌ Booking ${bookingId} Payment Failed.`);
             }
         }
+
         res.status(200).send();
     } catch (error) {
         console.error("Webhook Error:", error);
@@ -272,10 +315,8 @@ app.post('/api/send-approval', async (req, res) => {
 });
 
 // --- 6. Serve React Frontend (Static Files) ---
-// Serve static files from the 'dist' directory (generated by Vite)
 app.use(express.static(path.join(__dirname, '../dist')));
 
-// Handle all other routes by serving the index.html
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
