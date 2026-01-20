@@ -29,15 +29,17 @@ app.use(bodyParser.json());
 
 // --- 2. Environment Variables & Constants ---
 const PORT = process.env.PORT || 3000; 
+
+// Credentials provided
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '8520598013:AAG42JgQICMNO5HlI1nZQcisH0ecwE6aVRA';
 const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://mutamaraty-default-rtdb.firebaseio.com';
 const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || "CHURCH_CONF_SECURE_2025";
 
 // Paymob Configuration (Egypt)
-const PAYMOB_API_KEY = process.env.PAYMOB_API_KEY;
-const PAYMOB_INTEGRATION_ID = process.env.PAYMOB_INTEGRATION_ID; 
-const PAYMOB_IFRAME_ID = process.env.PAYMOB_IFRAME_ID;
-const PAYMOB_HMAC_SECRET = process.env.PAYMOB_HMAC_SECRET;
+const PAYMOB_API_KEY = process.env.PAYMOB_API_KEY || "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJjb250ZXh0Ijp7InVzZXJfaWQiOjkwODE5MCwibFtZQSI6ImluaXRpYXRvciIsInR5cGUiOiJtZXJjaGFudCIsInByb2ZpbGVzIjpbeyIiZCI6MTExMTc0MCwibmFtZSI6ImluaXRpYXRvciIsInBlcm1pc3Npb25zIjpbInJlYWQiLCJ3cml0ZSIsImVkaXQiXX1dfSwiaWF0IjoxNzM5MDkzNTgwLCJleHAiOjE3NzA2Mjk1ODB9.e9mFpHNU8UE_iKhXw1Hu2HId0sjG0meH50CGyDl2RnydC6XeE19xGeH9tm_ZppXtDcghiLCerJlh5GDF1tJn4A";
+const PAYMOB_INTEGRATION_ID = process.env.PAYMOB_INTEGRATION_ID || "5419269"; 
+const PAYMOB_IFRAME_ID = process.env.PAYMOB_IFRAME_ID || "983782";
+const PAYMOB_HMAC_SECRET = process.env.PAYMOB_HMAC_SECRET || "256D3B8CC68FFB2A11BE0F247EFCDAED";
 
 // --- 3. Firebase Initialization ---
 let db = null;
@@ -47,6 +49,9 @@ console.log("🔄 Server Starting...");
 
 try {
     if (!admin.apps.length) {
+        // Try to use environment variable first, then fallback to provided key if needed
+        let serviceAccount = null;
+
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
             try {
                 let rawJson = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -55,26 +60,31 @@ try {
                     if (rawJson.startsWith("'") && rawJson.endsWith("'")) rawJson = rawJson.slice(1, -1);
                     if (rawJson.startsWith('"') && rawJson.endsWith('"') && !rawJson.includes('{')) rawJson = JSON.parse(rawJson);
                 }
-                
-                let serviceAccount = typeof rawJson === 'object' ? rawJson : JSON.parse(rawJson);
+                serviceAccount = typeof rawJson === 'object' ? rawJson : JSON.parse(rawJson);
                 if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
                     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
                 }
-
-                admin.initializeApp({
-                    credential: admin.credential.cert(serviceAccount),
-                    databaseURL: FIREBASE_DB_URL
-                });
-                db = admin.database();
-                console.log("✅ Firebase Connected Successfully!");
             } catch (err) {
-                console.error("❌ Firebase JSON Parse Error:", err.message);
-                firebaseError = `JSON Parsing Error: ${err.message}`;
+                console.error("❌ Firebase Env Parse Error:", err.message);
             }
-        } else {
-            // Fallback for local dev if needed, or non-admin access
+        } 
+        
+        // Check if we have a valid service account object
+        if (serviceAccount) {
+             admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount),
+                databaseURL: FIREBASE_DB_URL
+            });
             db = admin.database();
-            console.log("⚠️ Using Default/Guest Firebase Access");
+            console.log("✅ Firebase Connected Successfully (Service Account)!");
+        } else {
+            // Fallback: Initialize without credentials (works if environment has default credentials or for public DBs)
+            // Note: For write access to secured DBs, a Service Account is required.
+            admin.initializeApp({
+                databaseURL: FIREBASE_DB_URL
+            });
+            db = admin.database();
+            console.log("⚠️ Using Default/Guest Firebase Access (Check DB Rules if writes fail)");
         }
     } else {
         db = admin.database();
@@ -134,54 +144,142 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', db: db ? 'connected' : 'disconnected', error: firebaseError });
 });
 
+/**
+ * Step 1: Initiate Payment
+ * Receives booking details, contacts Paymob, returns Iframe URL.
+ */
 app.post('/api/paymob/initiate', async (req, res) => {
-    if (!PAYMOB_API_KEY) return res.status(500).json({ success: false, error: 'Paymob not configured.' });
+    if (!PAYMOB_API_KEY) {
+        console.error("Paymob Config Missing");
+        return res.status(500).json({ success: false, error: 'Payment gateway configuration missing' });
+    }
+
     try {
         const { bookingId, amount, userDetails } = req.body;
+        // Paymob deals in Cents (EGP 100 = 10000 cents)
         const amountCents = Math.round(amount * 100);
 
-        const authResponse = await axios.post('https://accept.paymob.com/api/auth/tokens', { api_key: PAYMOB_API_KEY });
+        // A. Authenticate
+        const authResponse = await axios.post('https://accept.paymob.com/api/auth/tokens', {
+            api_key: PAYMOB_API_KEY
+        });
         const token = authResponse.data.token;
 
+        // B. Order Registration
+        // merchant_order_id should be unique. We use the Booking ID.
         const orderResponse = await axios.post('https://accept.paymob.com/api/ecommerce/orders', {
-            auth_token: token, delivery_needed: "false", amount_cents: amountCents, currency: "EGP", items: [], merchant_order_id: bookingId 
+            auth_token: token,
+            delivery_needed: "false",
+            amount_cents: amountCents,
+            currency: "EGP",
+            items: [],
+            merchant_order_id: bookingId 
         });
         const orderId = orderResponse.data.id;
 
-        if (db) await db.ref(`bookings/${bookingId}`).update({ paymobOrderId: orderId, paymentStatus: 'INITIATED' });
+        // Save Paymob Order ID to Firebase immediately
+        if (db) {
+            await db.ref(`bookings/${bookingId}`).update({
+                paymobOrderId: orderId,
+                paymentStatus: 'INITIATED'
+            });
+        }
 
+        // C. Payment Key Request
         const billingData = {
-            apartment: "NA", email: "user@church.com", floor: "NA", first_name: userDetails.name.split(' ')[0] || "User", street: "NA", building: "NA", phone_number: userDetails.phone, shipping_method: "NA", postal_code: "NA", city: "Cairo", country: "EG", last_name: "Member", state: "NA"
+            apartment: "NA", 
+            email: "user@church.com", 
+            floor: "NA", 
+            first_name: userDetails.name.split(' ')[0] || "User", 
+            street: "NA", 
+            building: "NA", 
+            phone_number: userDetails.phone, 
+            shipping_method: "NA", 
+            postal_code: "NA", 
+            city: "Cairo", 
+            country: "EG", 
+            last_name: "Member", 
+            state: "NA"
         };
 
         const keyResponse = await axios.post('https://accept.paymob.com/api/acceptance/payment_keys', {
-            auth_token: token, amount_cents: amountCents, expiration: 3600, order_id: orderId, billing_data: billingData, currency: "EGP", integration_id: PAYMOB_INTEGRATION_ID
+            auth_token: token,
+            amount_cents: amountCents,
+            expiration: 3600, // 1 hour
+            order_id: orderId,
+            billing_data: billingData,
+            currency: "EGP",
+            integration_id: PAYMOB_INTEGRATION_ID
         });
 
         const paymentKey = keyResponse.data.token;
         const iframeUrl = `https://accept.paymob.com/api/acceptance/iframes/${PAYMOB_IFRAME_ID}?payment_token=${paymentKey}`;
+
         return res.json({ success: true, url: iframeUrl });
+
     } catch (error) {
-        console.error("Paymob Error:", error.message);
-        return res.status(500).json({ success: false, error: "Payment init failed" });
+        console.error("Paymob Init Error:", error.response?.data || error.message);
+        return res.status(500).json({ success: false, error: "Payment initiation failed" });
     }
 });
 
+/**
+ * Step 2: Webhook Handler
+ * Paymob calls this when transaction status changes.
+ */
 app.post('/api/paymob/webhook', async (req, res) => {
+    // 1. Verify HMAC
     const { obj, type, hmac } = req.body;
+    
+    // We only care about Transactions
     if (type !== 'TRANSACTION') return res.status(200).send();
-    // HMAC Validation could go here
-    const success = obj.success;
+
+    if (PAYMOB_HMAC_SECRET) {
+        const {
+            amount_cents, created_at, currency, error_occured, has_parent_transaction,
+            id, integration_id, is_3d_secure, is_auth, is_capture, is_refunded,
+            is_standalone_payment, is_voided, order, owner, pending, source_data, success
+        } = obj;
+
+        // Paymob's strict lexical order for HMAC
+        const lexicon = [
+            amount_cents, created_at, currency, error_occured, has_parent_transaction,
+            id, integration_id, is_3d_secure, is_auth, is_capture, is_refunded,
+            is_standalone_payment, is_voided, order.id, owner, pending,
+            source_data.pan, source_data.sub_type, source_data.type, success
+        ];
+
+        const concatenatedString = lexicon.map(val => val.toString()).join('');
+        const calculatedHmac = crypto.createHmac('sha512', PAYMOB_HMAC_SECRET)
+            .update(concatenatedString)
+            .digest('hex');
+
+        if (hmac !== calculatedHmac) {
+            console.error("HMAC Mismatch!");
+            return res.status(403).send(); // Security check failed
+        }
+    }
+
+    // 2. Process Logic
+    const isSuccess = obj.success;
     const bookingId = obj.order.merchant_order_id;
     
     if (db && bookingId) {
-        if (success) {
-            await db.ref(`bookings/${bookingId}`).update({ status: 'APPROVED', paymentStatus: 'PAID', amountPaid: obj.amount_cents / 100 });
-            // Notify User Logic Here
+        if (isSuccess) {
+            await db.ref(`bookings/${bookingId}`).update({
+                status: 'APPROVED', // Auto-approve on payment
+                paymentStatus: 'PAID',
+                amountPaid: obj.amount_cents / 100
+            });
+            console.log(`💰 Booking ${bookingId} Paid & Approved.`);
         } else {
-            await db.ref(`bookings/${bookingId}`).update({ paymentStatus: 'FAILED' });
+            await db.ref(`bookings/${bookingId}`).update({
+                paymentStatus: 'FAILED'
+            });
+            console.log(`❌ Booking ${bookingId} Payment Failed.`);
         }
     }
+
     res.status(200).send();
 });
 
@@ -207,7 +305,6 @@ app.post('/api/send-approval', async (req, res) => {
 });
 
 // --- 7. Serve Frontend ---
-// This is critical for Railway deployment
 const distPath = path.resolve(__dirname, '../dist');
 
 if (fs.existsSync(distPath)) {
