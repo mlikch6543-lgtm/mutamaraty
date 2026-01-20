@@ -14,7 +14,7 @@ import QRCode from 'qrcode';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
-import crypto from 'crypto'; // Uses Node.js built-in crypto module
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,14 +59,12 @@ try {
                 // تنظيف النص في حال كان محاطاً بعلامات تنصيص زائدة بسبب Railway
                 if (typeof rawJson === 'string') {
                     rawJson = rawJson.trim();
-                    // إزالة علامات التنصيص الزائدة في البداية والنهاية إذا وجدت
                     if (rawJson.startsWith("'") && rawJson.endsWith("'")) rawJson = rawJson.slice(1, -1);
                     if (rawJson.startsWith('"') && rawJson.endsWith('"') && !rawJson.includes('{')) rawJson = JSON.parse(rawJson);
                 }
 
                 let serviceAccount = typeof rawJson === 'object' ? rawJson : JSON.parse(rawJson);
 
-                // إصلاح مشكلة New Line في المفتاح الخاص التي تحدث أحياناً عند نسخها
                 if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
                     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
                 }
@@ -97,7 +95,6 @@ try {
 // --- 4. تهيئة البوت ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 bot.on('polling_error', (error) => {
-    // تجاهل أخطاء الاتصال المتكررة لمنع إغراق السجلات
     if (error.code !== 'ETELEGRAM') {
         console.log("Telegram Polling Error:", error.code);
     }
@@ -179,20 +176,17 @@ app.get('/api/health', (req, res) => {
 
 /**
  * PAYMOB: Initiate Payment
- * 1. Auth -> 2. Register Order -> 3. Get Key -> Return Iframe URL
  */
 app.post('/api/paymob/initiate', async (req, res) => {
     try {
         const { bookingId, amount, userDetails } = req.body;
         const amountCents = Math.round(amount * 100);
 
-        // 1. Authenticate
         const authResponse = await axios.post('https://accept.paymob.com/api/auth/tokens', {
             api_key: PAYMOB_API_KEY
         });
         const token = authResponse.data.token;
 
-        // 2. Order Registration
         const orderResponse = await axios.post('https://accept.paymob.com/api/ecommerce/orders', {
             auth_token: token,
             delivery_needed: "false",
@@ -203,7 +197,6 @@ app.post('/api/paymob/initiate', async (req, res) => {
         });
         const orderId = orderResponse.data.id;
 
-        // Update DB with initial payment info
         if (db) {
             await db.ref(`bookings/${bookingId}`).update({
                 paymobOrderId: orderId,
@@ -211,7 +204,6 @@ app.post('/api/paymob/initiate', async (req, res) => {
             });
         }
 
-        // 3. Payment Key Request
         const billingData = {
             apartment: "NA", 
             email: "user@church.com", 
@@ -231,7 +223,7 @@ app.post('/api/paymob/initiate', async (req, res) => {
         const keyResponse = await axios.post('https://accept.paymob.com/api/acceptance/payment_keys', {
             auth_token: token,
             amount_cents: amountCents,
-            expiration: 3600, // 1 hour
+            expiration: 3600, 
             order_id: orderId,
             billing_data: billingData,
             currency: "EGP",
@@ -251,16 +243,13 @@ app.post('/api/paymob/initiate', async (req, res) => {
 
 /**
  * PAYMOB: Webhook
- * Receives transaction updates securely
  */
 app.post('/api/paymob/webhook', async (req, res) => {
     try {
         const { obj, type, hmac } = req.body;
         
-        // We only care about Transactions
         if (type !== 'TRANSACTION') return res.status(200).send();
 
-        // 1. Verify HMAC
         if (PAYMOB_HMAC_SECRET) {
             const {
                 amount_cents, created_at, currency, error_occured, has_parent_transaction,
@@ -268,7 +257,6 @@ app.post('/api/paymob/webhook', async (req, res) => {
                 is_standalone_payment, is_voided, order, owner, pending, source_data, success
             } = obj;
 
-            // Paymob's strict lexical order for HMAC
             const lexicon = [
                 amount_cents, created_at, currency, error_occured, has_parent_transaction,
                 id, integration_id, is_3d_secure, is_auth, is_capture, is_refunded,
@@ -287,13 +275,11 @@ app.post('/api/paymob/webhook', async (req, res) => {
             }
         }
 
-        // 2. Process Logic
         const isSuccess = obj.success;
         const bookingId = obj.order.merchant_order_id;
         
         if (db && bookingId) {
             if (isSuccess) {
-                // Auto-approve and mark as paid
                 await db.ref(`bookings/${bookingId}`).update({
                     status: 'APPROVED', 
                     paymentStatus: 'PAID',
