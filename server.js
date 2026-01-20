@@ -56,6 +56,7 @@ try {
             try {
                 let rawJson = process.env.FIREBASE_SERVICE_ACCOUNT;
                 
+                // تنظيف النص في حال كان محاطاً بعلامات تنصيص زائدة بسبب Railway
                 if (typeof rawJson === 'string') {
                     rawJson = rawJson.trim();
                     if (rawJson.startsWith("'") && rawJson.endsWith("'")) rawJson = rawJson.slice(1, -1);
@@ -64,6 +65,7 @@ try {
 
                 let serviceAccount = typeof rawJson === 'object' ? rawJson : JSON.parse(rawJson);
 
+                // إصلاح مشكلة New Line في المفتاح الخاص
                 if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
                     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
                 }
@@ -93,7 +95,9 @@ try {
 
 // --- 4. تهيئة البوت ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-bot.on('polling_error', () => {}); 
+bot.on('polling_error', (error) => {
+    console.log("Telegram Polling Error (Ignored):", error.code);
+}); 
 
 // --- 5. وظائف مساعدة ---
 const normalizePhone = (phone) => {
