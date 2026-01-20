@@ -395,6 +395,15 @@ app.post('/api/send-approval', async (req, res) => {
 // --- 7. Serve React Frontend (Production) ---
 // Serve static files from the React build directory
 const distPath = path.join(__dirname, '../dist');
+
+// Middleware to check if dist exists and log path on request
+app.use((req, res, next) => {
+    if (!req.path.startsWith('/api') && req.method === 'GET') {
+        // Optional logger
+    }
+    next();
+});
+
 if (fs.existsSync(distPath)) {
     console.log(`📂 Serving static files from: ${distPath}`);
     app.use(express.static(distPath));
@@ -412,7 +421,12 @@ if (fs.existsSync(distPath)) {
     // Fallback if no build is found (mostly for API-only dev)
     app.get('/', (req, res) => {
          const statusColor = db ? 'green' : 'red';
-         res.send(`Server Running. API Active. DB: <span style="color:${statusColor}">${db?'Connected':'Disconnected'}</span>. (Frontend Build Not Found)`);
+         res.send(`
+            <h1>Server Active 🚀</h1>
+            <p><strong>DB:</strong> <span style="color:${statusColor}">${db?'Connected':'Disconnected'}</span></p>
+            <p><strong>Error:</strong> Frontend build directory (dist) not found.</p>
+            <p><em>Running 'npm run build' on deployment should fix this.</em></p>
+         `);
     });
 }
 
