@@ -1,7 +1,1 @@
-{
-  "name": "server-side",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "description": "Sub-folder configuration"
-}
+{}
