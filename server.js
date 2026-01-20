@@ -15,6 +15,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
 import crypto from 'crypto';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -146,31 +147,6 @@ bot.onText(/\/start/, async (msg) => {
 
 // --- 6. API Routes ---
 
-app.get('/', (req, res) => {
-    const statusColor = db ? 'green' : 'red';
-    const statusText = db ? 'CONNECTED ✅' : 'DISCONNECTED ❌';
-    
-    res.send(`
-    <html>
-        <head><title>Church Server Status</title></head>
-        <body style="font-family: monospace; padding: 20px; background: #f0f0f0;">
-            <div style="background: white; padding: 20px; border-radius: 10px; border-left: 5px solid ${statusColor};">
-                <h1>Server Status 🚀</h1>
-                <p><strong>Database:</strong> <span style="color: ${statusColor}; font-weight: bold; font-size: 1.2em;">${statusText}</span></p>
-                <p><strong>Paymob Integration:</strong> ${PAYMOB_API_KEY ? 'Configured 💳' : 'Not Configured ⚠️'}</p>
-                <p><strong>Bot Status:</strong> Active ✅</p>
-                <p><strong>Port:</strong> ${PORT}</p>
-                ${firebaseError ? `<div style="background: #ffebee; color: #c62828; padding: 10px; border-radius: 5px; margin-top: 10px;">
-                    <strong>Error Details:</strong><br/>
-                    ${firebaseError}
-                </div>` : ''}
-                <p><strong>Last Check:</strong> ${new Date().toISOString()}</p>
-            </div>
-        </body>
-    </html>
-    `);
-});
-
 app.get('/api/health', (req, res) => {
     res.json({ 
         status: 'ok', 
@@ -184,7 +160,6 @@ app.get('/api/health', (req, res) => {
 
 /**
  * PAYMOB: Initiate Payment
- * 1. Auth -> 2. Register Order -> 3. Payment Key -> 4. Return Iframe URL
  */
 app.post('/api/paymob/initiate', async (req, res) => {
     if (!PAYMOB_API_KEY || !PAYMOB_INTEGRATION_ID) {
@@ -207,12 +182,12 @@ app.post('/api/paymob/initiate', async (req, res) => {
             delivery_needed: "false",
             amount_cents: amountCents,
             currency: "EGP",
-            items: [], // Optional: Add items for detail
-            merchant_order_id: bookingId // Use our booking ID as reference
+            items: [], 
+            merchant_order_id: bookingId 
         });
         const orderId = orderResponse.data.id;
 
-        // 3. Save Order ID to Firebase Booking (Important for matching webhook later)
+        // 3. Save Order ID
         if (db) {
             await db.ref(`bookings/${bookingId}`).update({
                 paymobOrderId: orderId,
@@ -223,7 +198,7 @@ app.post('/api/paymob/initiate', async (req, res) => {
         // 4. Payment Key Request
         const billingData = {
             apartment: "NA", 
-            email: "user@church-app.com", // Placeholder if not collected
+            email: "user@church-app.com", 
             floor: "NA", 
             first_name: userDetails.name.split(' ')[0] || "User", 
             street: "NA", 
@@ -240,7 +215,7 @@ app.post('/api/paymob/initiate', async (req, res) => {
         const keyResponse = await axios.post('https://accept.paymob.com/api/acceptance/payment_keys', {
             auth_token: token,
             amount_cents: amountCents,
-            expiration: 3600, // 1 Hour
+            expiration: 3600, 
             order_id: orderId,
             billing_data: billingData,
             currency: "EGP",
@@ -259,19 +234,15 @@ app.post('/api/paymob/initiate', async (req, res) => {
 });
 
 /**
- * PAYMOB: Webhook (Processed Transaction Callback)
- * Handles the logic when payment is successful or failed.
- * Security: Validates HMAC.
+ * PAYMOB: Webhook
  */
 app.post('/api/paymob/webhook', async (req, res) => {
     const { obj, type, hmac } = req.body;
 
-    // We only care about transaction callbacks
     if (type !== 'TRANSACTION') {
         return res.status(200).send();
     }
 
-    // 1. Verify HMAC (Security)
     if (PAYMOB_HMAC_SECRET && hmac) {
         const {
             amount_cents,
@@ -296,7 +267,6 @@ app.post('/api/paymob/webhook', async (req, res) => {
             success,
         } = obj;
 
-        // Order of concatenation matters per Paymob Docs
         const lexString = 
             amount_cents + 
             created_at + 
@@ -330,7 +300,6 @@ app.post('/api/paymob/webhook', async (req, res) => {
         }
     }
 
-    // 2. Process Transaction
     const success = obj.success;
     const orderId = obj.order.id;
     const transactionId = obj.id;
@@ -340,20 +309,18 @@ app.post('/api/paymob/webhook', async (req, res) => {
 
     if (db && success === true) {
         try {
-            // Find booking by Paymob Order ID (merchant_order_id matches our booking ID)
             const bookingId = obj.order.merchant_order_id;
 
             if (bookingId) {
                 await db.ref(`bookings/${bookingId}`).update({
-                    status: 'APPROVED', // Auto-approve paid bookings
+                    status: 'APPROVED', 
                     paymentStatus: 'PAID',
                     transactionId: transactionId,
                     amountPaid: amount,
                     updatedAt: new Date().toISOString()
                 });
-                console.log(`✅ Booking ${bookingId} marked as PAID & APPROVED.`);
                 
-                // Optional: Send Notification via Bot immediately
+                // Optional: Send Notification via Bot
                 const snapshot = await db.ref(`bookings/${bookingId}`).once('value');
                 const booking = snapshot.val();
                 if (booking) {
@@ -366,8 +333,6 @@ app.post('/api/paymob/webhook', async (req, res) => {
                        }
                     } catch(e) { console.error("Notif Error", e); }
                 }
-            } else {
-                console.warn("⚠️ No merchant_order_id found in callback.");
             }
         } catch (error) {
             console.error("Database Update Error:", error);
@@ -385,7 +350,7 @@ app.post('/api/paymob/webhook', async (req, res) => {
     res.status(200).send();
 });
 
-// Admin Notification Endpoint (Existing)
+// Admin Notification Endpoint
 app.post('/api/send-approval', async (req, res) => {
     if (req.headers['x-admin-token'] !== SERVER_SECRET_KEY) {
         return res.status(403).json({ success: false, error: 'Unauthorized' });
@@ -426,6 +391,30 @@ app.post('/api/send-approval', async (req, res) => {
         return res.status(500).json({ success: false, error: error.message });
     }
 });
+
+// --- 7. Serve React Frontend (Production) ---
+// Serve static files from the React build directory
+const distPath = path.join(__dirname, '../dist');
+if (fs.existsSync(distPath)) {
+    console.log(`📂 Serving static files from: ${distPath}`);
+    app.use(express.static(distPath));
+    
+    // Catch-all handler for React SPA (must be last)
+    app.get('*', (req, res) => {
+        // Don't intercept API calls
+        if (req.path.startsWith('/api')) {
+            return res.status(404).json({ error: 'API endpoint not found' });
+        }
+        res.sendFile(path.join(distPath, 'index.html'));
+    });
+} else {
+    console.warn(`⚠️ Frontend build not found at: ${distPath}. Run 'npm run build' first.`);
+    // Fallback if no build is found (mostly for API-only dev)
+    app.get('/', (req, res) => {
+         const statusColor = db ? 'green' : 'red';
+         res.send(`Server Running. API Active. DB: <span style="color:${statusColor}">${db?'Connected':'Disconnected'}</span>. (Frontend Build Not Found)`);
+    });
+}
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
