@@ -33,12 +33,13 @@ app.options('*', cors());
 app.use(bodyParser.json());
 
 // --- 2. Environment Variables & Constants ---
-const PORT = process.env.PORT || 3001;
+// Using 3000 as requested, but defaulting to process.env.PORT for Railway compatibility
+const PORT = process.env.PORT || 3000; 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '8520598013:AAG42JgQICMNO5HlI1nZQcisH0ecwE6aVRA';
 const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://mutamaraty-default-rtdb.firebaseio.com';
 const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || "CHURCH_CONF_SECURE_2025";
 
-// Paymob Configuration (Egypt) - Final Production Keys
+// Paymob Configuration (Egypt) - Final Production Keys from Prompt
 const PAYMOB_API_KEY = process.env.PAYMOB_API_KEY || "ZXlKaGJHY2lPaUpJVXpVeE1pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SmpiR0Z6Y3lJNklrMWxjbU5vWVc1MElpd2ljSEp2Wm1sc1pWOXdheUk2TVRFeE1UYzBNQ3dpYm1GdFpTSTZJbWx1YVhScFlXd2lmUS5lOW1GcEhOVThVRV9pS2hYdzFIdTJISWQwc2pHMG1lSDUwQ0d5RGwyUm55ZEM2WGVFMTl4R2VIOXRtX1pwcFh0RGNnaGlMQ2VySmxoNUdERjF0Sm40QQ==";
 const PAYMOB_INTEGRATION_ID = process.env.PAYMOB_INTEGRATION_ID || "5419269"; 
 const PAYMOB_IFRAME_ID = process.env.PAYMOB_IFRAME_ID || "983782";
@@ -55,6 +56,7 @@ try {
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
             try {
                 let rawJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+                // Handle potential string escaping from environment variables
                 if (typeof rawJson === 'string') {
                     rawJson = rawJson.trim();
                     if (rawJson.startsWith("'") && rawJson.endsWith("'")) {
@@ -64,7 +66,10 @@ try {
                         rawJson = JSON.parse(rawJson);
                     }
                 }
+                
                 let serviceAccount = typeof rawJson === 'object' ? rawJson : JSON.parse(rawJson);
+                
+                // Fix newline characters in private key
                 if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
                     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
                 }
@@ -78,7 +83,7 @@ try {
                 firebaseError = null;
             } catch (err) {
                 console.error("❌ Firebase JSON Parse Error:", err.message);
-                firebaseError = `JSON Parsing Error: ${err.message}. Check Railway Variable format.`;
+                firebaseError = `JSON Parsing Error: ${err.message}. Ensure FIREBASE_SERVICE_ACCOUNT is the full JSON object.`;
             }
         } else {
             console.warn("⚠️ Warning: FIREBASE_SERVICE_ACCOUNT is missing.");
@@ -94,7 +99,7 @@ try {
 
 // --- 4. Bot Initialization ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-bot.on('polling_error', () => {});
+bot.on('polling_error', (err) => console.log('Telegram Polling Error (ignoring):', err.code));
 
 // --- 5. Helpers ---
 const normalizePhone = (phone) => {
@@ -154,6 +159,7 @@ app.get('/', (req, res) => {
                 <p><strong>Database:</strong> <span style="color: ${statusColor}; font-weight: bold; font-size: 1.2em;">${statusText}</span></p>
                 <p><strong>Paymob Integration:</strong> ${PAYMOB_API_KEY ? 'Configured 💳' : 'Not Configured ⚠️'}</p>
                 <p><strong>Bot Status:</strong> Active ✅</p>
+                <p><strong>Port:</strong> ${PORT}</p>
                 ${firebaseError ? `<div style="background: #ffebee; color: #c62828; padding: 10px; border-radius: 5px; margin-top: 10px;">
                     <strong>Error Details:</strong><br/>
                     ${firebaseError}
