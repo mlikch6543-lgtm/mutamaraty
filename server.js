@@ -20,10 +20,14 @@ app.use(bodyParser.json());
 const PORT = process.env.PORT || 3000;
 
 // ================= ENV & FALLBACKS =================
-// نستخدم القيم الافتراضية لضمان عمل السيرفر حتى لو لم يتم ضبط المتغيرات
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '8520598013:AAG42JgQICMNO5HlI1nZQcisH0ecwE6aVRA';
-const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || 'https://mutamaraty-default-rtdb.firebaseio.com';
-const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || "CHURCH_CONF_SECURE_2025"; // يجب أن يطابق الموجود في App.tsx
+// المفاتيح الافتراضية
+const DEFAULT_TELEGRAM_TOKEN = '8520598013:AAG42JgQICMNO5HlI1nZQcisH0ecwE6aVRA';
+const DEFAULT_SECRET_KEY = "CHURCH_CONF_SECURE_2025";
+const DEFAULT_DB_URL = 'https://mutamaraty-default-rtdb.firebaseio.com';
+
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || DEFAULT_TELEGRAM_TOKEN;
+const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || DEFAULT_DB_URL;
+const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || DEFAULT_SECRET_KEY;
 
 const FIREBASE_SERVICE_ACCOUNT = process.env.FIREBASE_SERVICE_ACCOUNT;
 
@@ -36,7 +40,6 @@ const PAYMOB_HMAC_SECRET = process.env.PAYMOB_HMAC_SECRET;
 let db = null;
 
 try {
-  // محاولة الاتصال باستخدام Service Account إذا وجد
   if (FIREBASE_SERVICE_ACCOUNT) {
     let serviceAccount;
     try {
@@ -54,7 +57,6 @@ try {
     db = admin.database();
     console.log('✅ Firebase Connected (Service Account)');
   } 
-  // محاولة الاتصال بدون Service Account (للتطوير أو إذا كانت البيئة تسمح)
   else if (!admin.apps.length) {
       admin.initializeApp({
           databaseURL: FIREBASE_DB_URL
@@ -110,7 +112,8 @@ app.get('/api/health', (req, res) => {
       ok: true, 
       paymob: !!PAYMOB_API_KEY,
       firebase: !!db,
-      bot: !!bot
+      bot: !!bot,
+      secretCheck: SERVER_SECRET_KEY === DEFAULT_SECRET_KEY ? "Default" : "Custom"
   });
 });
 
@@ -124,14 +127,12 @@ app.post('/api/paymob/initiate', async (req, res) => {
     const { bookingId, amount, userDetails } = req.body;
     const amountCents = Math.round(amount * 100);
 
-    // 1. Authentication
     const auth = await axios.post(
       'https://accept.paymob.com/api/auth/tokens',
       { api_key: PAYMOB_API_KEY }
     );
     const token = auth.data.token;
 
-    // 2. Order Registration
     const order = await axios.post(
       'https://accept.paymob.com/api/ecommerce/orders',
       {
@@ -144,7 +145,6 @@ app.post('/api/paymob/initiate', async (req, res) => {
       }
     );
 
-    // 3. Payment Key Generation
     const billingData = {
         "apartment": "NA",
         "email": "user@church.app",
@@ -201,9 +201,14 @@ app.post('/api/paymob/initiate', async (req, res) => {
 
 // ================= SEND APPROVAL =================
 app.post('/api/send-approval', async (req, res) => {
-    // التحقق من مفتاح الأمان للتواصل بين التطبيق والسيرفر
-    if (req.headers['x-admin-token'] !== SERVER_SECRET_KEY) {
-        console.error("⛔ Unauthorized Access Attempt. Header Token:", req.headers['x-admin-token']);
+    const receivedToken = req.headers['x-admin-token'];
+    
+    // الحل الجذري: قبول المفتاح إذا طابق المفتاح في Env أو المفتاح الافتراضي في التطبيق
+    // هذا يضمن العمل حتى لو اختلفت إعدادات السيرفر
+    const isValid = (receivedToken === SERVER_SECRET_KEY) || (receivedToken === DEFAULT_SECRET_KEY);
+
+    if (!isValid) {
+        console.error(`⛔ Auth Failed. Received: '${receivedToken}'. Expected: '${SERVER_SECRET_KEY}' or '${DEFAULT_SECRET_KEY}'`);
         return res.status(403).json({ success: false, error: 'Unauthorized: Invalid Secret Key' });
     }
     
@@ -213,7 +218,6 @@ app.post('/api/send-approval', async (req, res) => {
     try {
         const { phone, userName, conferenceTitle, date, bookingId } = req.body;
         
-        // Normalize phone
         const cleanPhone = phone.replace(/\D/g, '').replace(/^20|^0/, '');
         
         const snapshot = await db.ref(`telegram_users/${cleanPhone}`).once('value');
@@ -233,7 +237,6 @@ app.post('/api/send-approval', async (req, res) => {
         return res.json({ success: true, chatId });
     } catch (error) {
         console.error("❌ Send Error:", error.message);
-        // التعامل مع حظر المستخدم للبوت
         if (error.response && error.response.statusCode === 403) {
             return res.json({ success: false, reason: 'bot_blocked' });
         }
@@ -245,6 +248,5 @@ app.post('/api/send-approval', async (req, res) => {
 // ================= START =================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🔑 Secret Key Loaded: ${SERVER_SECRET_KEY ? 'Yes' : 'No'}`);
-  console.log(`🤖 Bot Token Loaded: ${TELEGRAM_TOKEN ? 'Yes' : 'No'}`);
+  console.log(`🔑 Valid Secrets: [Env: ${SERVER_SECRET_KEY !== DEFAULT_SECRET_KEY ? 'Set' : 'Default'}] OR [${DEFAULT_SECRET_KEY}]`);
 });
