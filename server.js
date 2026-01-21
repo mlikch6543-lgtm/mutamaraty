@@ -20,14 +20,21 @@ app.use(bodyParser.json());
 const PORT = process.env.PORT || 3000;
 
 // ================= ENV & FALLBACKS =================
-// المفاتيح الافتراضية
 const DEFAULT_TELEGRAM_TOKEN = '8520598013:AAG42JgQICMNO5HlI1nZQcisH0ecwE6aVRA';
 const DEFAULT_SECRET_KEY = "CHURCH_CONF_SECURE_2025";
-const DEFAULT_DB_URL = 'https://mutamaraty-default-rtdb.firebaseio.com';
+// الرابط الصحيح لقاعدة البيانات
+const CORRECT_DB_URL = 'https://mutamaraty-default-rtdb.firebaseio.com';
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || DEFAULT_TELEGRAM_TOKEN;
-const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || DEFAULT_DB_URL;
 const SERVER_SECRET_KEY = process.env.SERVER_SECRET_KEY || DEFAULT_SECRET_KEY;
+
+// تصحيح ذكي لرابط قاعدة البيانات
+let targetDbUrl = process.env.FIREBASE_DB_URL || CORRECT_DB_URL;
+if (targetDbUrl.includes('console.firebase.google.com')) {
+    console.warn("⚠️ Detected Console URL in FIREBASE_DB_URL. Auto-switching to correct API URL.");
+    targetDbUrl = CORRECT_DB_URL;
+}
+const FIREBASE_DB_URL = targetDbUrl;
 
 const FIREBASE_SERVICE_ACCOUNT = process.env.FIREBASE_SERVICE_ACCOUNT;
 
@@ -43,31 +50,42 @@ try {
   if (FIREBASE_SERVICE_ACCOUNT) {
     let serviceAccount;
     try {
-        serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT);
+        // محاولة تنظيف النص من أي أحرف غريبة ناتجة عن النسخ واللصق
+        const cleanJson = FIREBASE_SERVICE_ACCOUNT.trim();
+        // معالجة Newlines إذا كانت escaped
+        serviceAccount = JSON.parse(cleanJson.replace(/\\n/g, '\n'));
     } catch (e) {
-        serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT.replace(/\\n/g, '\n'));
+        console.error("JSON Parse Error (First Attempt):", e.message);
+        try {
+            // محاولة أخيرة للقراءة المباشرة
+            serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT);
+        } catch (e2) {
+             console.error("JSON Parse Error (Final):", e2.message);
+        }
     }
 
-    if (!admin.apps.length) {
+    if (serviceAccount && !admin.apps.length) {
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount),
             databaseURL: FIREBASE_DB_URL
         });
+        db = admin.database();
+        console.log(`✅ Firebase Connected via Service Account to: ${FIREBASE_DB_URL}`);
+    } else if (admin.apps.length) {
+        db = admin.database();
     }
-    db = admin.database();
-    console.log('✅ Firebase Connected (Service Account)');
   } 
   else if (!admin.apps.length) {
       admin.initializeApp({
           databaseURL: FIREBASE_DB_URL
       });
       db = admin.database();
-      console.log('⚠️ Firebase Connected (No Auth - Check Rules)');
+      console.log(`⚠️ Firebase Connected (No Auth) to: ${FIREBASE_DB_URL}`);
   } else {
       db = admin.database();
   }
 } catch (e) {
-  console.error('❌ Firebase Error:', e.message);
+  console.error('❌ Firebase Init Error:', e.message);
 }
 
 // ================= TELEGRAM =================
@@ -83,8 +101,15 @@ if (TELEGRAM_TOKEN) {
         bot.on('contact', async msg => {
           if(db) {
               const phone = normalizePhone(msg.contact.phone_number);
-              await db.ref(`telegram_users/${phone}`).set(msg.chat.id);
-              bot.sendMessage(msg.chat.id, '✅ تم التفعيل بنجاح. ستصلك تذاكرك هنا.');
+              try {
+                await db.ref(`telegram_users/${phone}`).set(msg.chat.id);
+                bot.sendMessage(msg.chat.id, '✅ تم التفعيل بنجاح. ستصلك تذاكرك هنا.');
+              } catch (dbErr) {
+                console.error("DB Write Error:", dbErr.message);
+                bot.sendMessage(msg.chat.id, '⚠️ حدث خطأ أثناء حفظ بياناتك، حاول مرة أخرى.');
+              }
+          } else {
+              bot.sendMessage(msg.chat.id, '⚠️ الخادم غير متصل بقاعدة البيانات حالياً.');
           }
         });
 
@@ -112,6 +137,7 @@ app.get('/api/health', (req, res) => {
       ok: true, 
       paymob: !!PAYMOB_API_KEY,
       firebase: !!db,
+      dbUrl: FIREBASE_DB_URL, // لإظهار الرابط المستخدم فعلياً للتأكد
       bot: !!bot,
       secretCheck: SERVER_SECRET_KEY === DEFAULT_SECRET_KEY ? "Default" : "Custom"
   });
@@ -203,12 +229,10 @@ app.post('/api/paymob/initiate', async (req, res) => {
 app.post('/api/send-approval', async (req, res) => {
     const receivedToken = req.headers['x-admin-token'];
     
-    // الحل الجذري: قبول المفتاح إذا طابق المفتاح في Env أو المفتاح الافتراضي في التطبيق
-    // هذا يضمن العمل حتى لو اختلفت إعدادات السيرفر
     const isValid = (receivedToken === SERVER_SECRET_KEY) || (receivedToken === DEFAULT_SECRET_KEY);
 
     if (!isValid) {
-        console.error(`⛔ Auth Failed. Received: '${receivedToken}'. Expected: '${SERVER_SECRET_KEY}' or '${DEFAULT_SECRET_KEY}'`);
+        console.error(`⛔ Auth Failed. Received: '${receivedToken}'`);
         return res.status(403).json({ success: false, error: 'Unauthorized: Invalid Secret Key' });
     }
     
@@ -248,5 +272,5 @@ app.post('/api/send-approval', async (req, res) => {
 // ================= START =================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🔑 Valid Secrets: [Env: ${SERVER_SECRET_KEY !== DEFAULT_SECRET_KEY ? 'Set' : 'Default'}] OR [${DEFAULT_SECRET_KEY}]`);
+  console.log(`📡 Database URL: ${FIREBASE_DB_URL}`);
 });
