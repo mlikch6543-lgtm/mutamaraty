@@ -39,7 +39,10 @@ const FIREBASE_DB_URL = targetDbUrl;
 const FIREBASE_SERVICE_ACCOUNT = process.env.FIREBASE_SERVICE_ACCOUNT;
 
 const PAYMOB_API_KEY = process.env.PAYMOB_API_KEY;
-const PAYMOB_INTEGRATION_ID = process.env.PAYMOB_INTEGRATION_ID;
+// معرفات الدمج الجديدة (تستخدم القيم الافتراضية إذا لم توجد في ENV)
+const PAYMOB_INTEGRATION_ID_CARD = process.env.PAYMOB_INTEGRATION_ID_CARD || '5419269';
+const PAYMOB_INTEGRATION_ID_WALLET = process.env.PAYMOB_INTEGRATION_ID_WALLET || '5474950';
+
 const PAYMOB_IFRAME_ID = process.env.PAYMOB_IFRAME_ID;
 const PAYMOB_HMAC_SECRET = process.env.PAYMOB_HMAC_SECRET;
 
@@ -150,8 +153,12 @@ app.post('/api/paymob/initiate', async (req, res) => {
         throw new Error("Paymob API Key is missing on server");
     }
 
-    const { bookingId, amount, userDetails } = req.body;
+    const { bookingId, amount, userDetails, paymentMethod } = req.body;
     const amountCents = Math.round(amount * 100);
+
+    // تحديد نوع الدمج (كارت أو محفظة)
+    // الافتراضي هو الكارت (Card)
+    const integrationId = paymentMethod === 'WALLET' ? PAYMOB_INTEGRATION_ID_WALLET : PAYMOB_INTEGRATION_ID_CARD;
 
     const auth = await axios.post(
       'https://accept.paymob.com/api/auth/tokens',
@@ -196,7 +203,7 @@ app.post('/api/paymob/initiate', async (req, res) => {
         order_id: order.data.id,
         billing_data: billingData,
         currency: 'EGP',
-        integration_id: PAYMOB_INTEGRATION_ID
+        integration_id: integrationId
       }
     );
 
@@ -213,7 +220,8 @@ app.post('/api/paymob/initiate', async (req, res) => {
 
     res.json({
       success: true,
-      url: `https://accept.paymob.com/api/acceptance/iframes/${PAYMOB_IFRAME_ID}?payment_token=${key.data.token}`
+      url: `https://accept.paymob.com/api/acceptance/iframes/${PAYMOB_IFRAME_ID}?payment_token=${key.data.token}`,
+      token: key.data.token // Useful for mobile SDKs or custom flows
     });
 
   } catch (e) {
@@ -273,4 +281,5 @@ app.post('/api/send-approval', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📡 Database URL: ${FIREBASE_DB_URL}`);
+  console.log(`💳 Paymob IDs Loaded: Card(${PAYMOB_INTEGRATION_ID_CARD}) | Wallet(${PAYMOB_INTEGRATION_ID_WALLET})`);
 });
